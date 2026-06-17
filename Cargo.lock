@@ -878,11 +878,19 @@ dependencies = [
  "clap",
  "core-foundation",
  "libc",
+ "macmon-graph",
  "num-traits",
  "ratatui",
  "serde",
  "serde-inline-default",
  "serde_json",
+]
+
+[[package]]
+name = "macmon-graph"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
 ]
 
 [[package]]

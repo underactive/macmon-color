@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "macmon-graph"]
+resolver = "2"
+
 [package]
 name = "macmon"
 version = "0.7.2"
@@ -39,6 +43,7 @@ strip = false
 lto = false
 
 [dependencies]
+macmon-graph = { path = "macmon-graph" }
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
 core-foundation = "0.10.1"

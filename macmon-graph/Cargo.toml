@@ -1,0 +1,13 @@
+[package]
+name = "macmon-graph"
+version = "0.1.0"
+edition = "2024"
+description = "btop-style colored graph rendering for terminal UIs — ratatui widget"
+license = "MIT"
+
+[dependencies]
+ratatui = "0.30"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"

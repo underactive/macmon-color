@@ -13,12 +13,23 @@ use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
 use crate::shared::zero_div;
 use crate::sources::{SocInfo, get_soc_info};
 use macmon::{FanMetric, MemMetrics, Metrics, Sampler};
+use macmon_graph::{ColorGradient, ColorGraph, GradientTheme};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 const GB: u64 = 1024 * 1024 * 1024;
 const MAX_SPARKLINE: usize = 128;
 const MAX_TEMPS: usize = 8;
+
+// macmon stores the newest sample at index 0, and the original `Sparkline`
+// renders it at the RIGHT edge (ratatui's `RenderDirection::RightToLeft` puts
+// data[0] on the right), so graphs scroll right-to-left.
+//
+// macmon_graph's `Direction` uses the OPPOSITE naming convention: its
+// `LeftToRight` is the variant that reverses the (newest-first) series and
+// right-aligns it — i.e. newest on the right. Use it so colored graphs match
+// the monochrome ones instead of rendering mirrored.
+const GRAPH_DIRECTION: macmon_graph::Direction = macmon_graph::Direction::LeftToRight;
 
 // MARK: Term utils
 
@@ -178,6 +189,14 @@ fn bar_set() -> symbols::bar::Set<'static> {
   }
 }
 
+// macmon stores series as `Vec<u64>`, but `ColorGraph` borrows `&[f64]`.
+// This allocates a small Vec each frame (≤128 elements at ~1fps), which is
+// negligible. The returned Vec must outlive the widget that borrows it, so
+// callers create it locally and render in the same scope.
+fn to_f64_vec(items: &[u64]) -> Vec<f64> {
+  items.iter().map(|&v| v as f64).collect()
+}
+
 // MARK: Components
 
 fn compute_aggregate_freq(cores: &[FreqStore]) -> FreqStore {
@@ -225,6 +244,8 @@ enum Event {
   ChangeColor,
   ChangeView,
   TogglePerCore,
+  ChangeGraphSymbol,
+  ToggleColoredGraphs,
   IncInterval,
   DecInterval,
   Tick,
@@ -238,6 +259,8 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
     KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
     KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
     KeyCode::Char('d') => Ok(tx.send(Event::TogglePerCore)?),
+    KeyCode::Char('g') => Ok(tx.send(Event::ChangeGraphSymbol)?),
+    KeyCode::Char('t') => Ok(tx.send(Event::ToggleColoredGraphs)?),
     KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
     KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
     KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
@@ -369,7 +392,17 @@ impl App {
     block
   }
 
-  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
+  // Per §3.6: power gradient tracks the section. CPU power tracks load (Cpu),
+  // GPU power matches the GPU frequency hue (Temp), ANE gets a warm tone.
+  fn gradient_for_power(&self, label: &str) -> GradientTheme {
+    match label {
+      "GPU" => GradientTheme::Temp,
+      "ANE" => GradientTheme::Available,
+      _ => GradientTheme::Cpu, // "CPU" and any fallback
+    }
+  }
+
+  fn render_power_block(&self, f: &mut Frame, r: Rect, label: &str, val: &PowerStore, temp: f32) {
     let label_l = format!(
       "{} {:.2}W ({:.2}, {:.2})",
       // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
@@ -381,29 +414,64 @@ impl App {
     );
 
     let label_r = if temp > 0.0 { format!("{:.1}°C", temp) } else { "".to_string() };
+    let block = self.title_block(label_l.as_str(), label_r.as_str());
 
-    Sparkline::default()
-      .block(self.title_block(label_l.as_str(), label_r.as_str()))
-      .direction(RenderDirection::RightToLeft)
-      .data(&val.items)
-      .style(self.cfg.color)
-      .bar_set(bar_set())
+    if self.cfg.colored_graphs {
+      // Power is stored as milliwatts (`value * 1000`) with no fixed ceiling.
+      // Sparkline auto-scales to the data's own peak; we replicate that by
+      // scaling to the max sample so the graph fills vertically rather than
+      // clamping against a fixed 100 default.
+      let data = to_f64_vec(&val.items);
+      let max = (val.max_value * 1000.0).max(1.0);
+      let w = ColorGraph::new()
+        .data(&data)
+        .max_value(max)
+        .gradient(ColorGradient::from_theme(self.gradient_for_power(label)))
+        .symbol_set(self.cfg.graph_symbol.to_symbol_set())
+        .direction(GRAPH_DIRECTION)
+        .block(block);
+      f.render_widget(w, r);
+    } else {
+      let w = Sparkline::default()
+        .block(block)
+        .direction(RenderDirection::RightToLeft)
+        .data(&val.items)
+        .style(self.cfg.color)
+        .bar_set(bar_set());
+      f.render_widget(w, r);
+    }
   }
 
   fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
+    // GPU frequency uses the Temp gradient to stay visually distinct from the
+    // CPU clusters (§3.6); E/P-CPU use the standard load gradient.
+    let theme = if label.starts_with("GPU") { GradientTheme::Temp } else { GradientTheme::Cpu };
+
     let label = format!("{} {:3.0}% @ {:4.0} MHz", label, val.usage * 100.0, val.top_value);
     let block = self.title_block(label.as_str(), "");
 
     match self.cfg.view_type {
       ViewType::Sparkline => {
-        let w = Sparkline::default()
-          .block(block)
-          .direction(RenderDirection::RightToLeft)
-          .data(&val.items)
-          .max(100)
-          .style(self.cfg.color)
-          .bar_set(bar_set());
-        f.render_widget(w, r);
+        if self.cfg.colored_graphs {
+          let data = to_f64_vec(&val.items);
+          let w = ColorGraph::new()
+            .data(&data)
+            .max_value(100.0)
+            .gradient(ColorGradient::from_theme(theme))
+            .symbol_set(self.cfg.graph_symbol.to_symbol_set())
+            .direction(GRAPH_DIRECTION)
+            .block(block);
+          f.render_widget(w, r);
+        } else {
+          let w = Sparkline::default()
+            .block(block)
+            .direction(RenderDirection::RightToLeft)
+            .data(&val.items)
+            .max(100)
+            .style(self.cfg.color)
+            .bar_set(bar_set());
+          f.render_widget(w, r);
+        }
       }
       ViewType::Gauge => {
         let w = Gauge::default()
@@ -453,19 +521,12 @@ impl App {
 
       match self.cfg.view_type {
         ViewType::Sparkline => {
-          let w = Sparkline::default()
-            .direction(RenderDirection::RightToLeft)
-            .data(&core.items)
-            .max(100)
-            .style(self.cfg.color)
-            .bar_set(bar_set());
-
-          // Add a small label for the core
+          // Render the core label prefix first; the graph fills the rest of the
+          // row. This is independent of which graph widget we use below.
           let label_len = core_label.len();
           let label_span = Span::styled(core_label, Style::default().fg(self.cfg.color));
           let mut area = core_areas[i];
 
-          // Render core label at the start
           if area.width > label_len as u16 {
             let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
             f.render_widget(Paragraph::new(label_span), label_area);
@@ -473,7 +534,24 @@ impl App {
             area.width = area.width.saturating_sub(label_len as u16 + 1);
           }
 
-          f.render_widget(w, area);
+          if self.cfg.colored_graphs {
+            let data = to_f64_vec(&core.items);
+            let w = ColorGraph::new()
+              .data(&data)
+              .max_value(100.0)
+              .gradient(ColorGradient::from_theme(GradientTheme::Cpu))
+              .symbol_set(self.cfg.graph_symbol.to_symbol_set())
+              .direction(GRAPH_DIRECTION);
+            f.render_widget(w, area);
+          } else {
+            let w = Sparkline::default()
+              .direction(RenderDirection::RightToLeft)
+              .data(&core.items)
+              .max(100)
+              .style(self.cfg.color)
+              .bar_set(bar_set());
+            f.render_widget(w, area);
+          }
         }
         ViewType::Gauge => {
           let w = Gauge::default()
@@ -501,14 +579,26 @@ impl App {
     let block = self.title_block(label_l.as_str(), label_r.as_str());
     match self.cfg.view_type {
       ViewType::Sparkline => {
-        let w = Sparkline::default()
-          .block(block)
-          .direction(RenderDirection::RightToLeft)
-          .data(&val.items)
-          .max(val.ram_total)
-          .style(self.cfg.color)
-          .bar_set(bar_set());
-        f.render_widget(w, r);
+        if self.cfg.colored_graphs {
+          let data = to_f64_vec(&val.items);
+          let w = ColorGraph::new()
+            .data(&data)
+            .max_value(val.ram_total as f64)
+            .gradient(ColorGradient::from_theme(GradientTheme::Used))
+            .symbol_set(self.cfg.graph_symbol.to_symbol_set())
+            .direction(GRAPH_DIRECTION)
+            .block(block);
+          f.render_widget(w, r);
+        } else {
+          let w = Sparkline::default()
+            .block(block)
+            .direction(RenderDirection::RightToLeft)
+            .data(&val.items)
+            .max(val.ram_total)
+            .style(self.cfg.color)
+            .bar_set(bar_set());
+          f.render_widget(w, r);
+        }
       }
       ViewType::Gauge => {
         let w = Gauge::default()
@@ -547,13 +637,6 @@ impl App {
     let ram_label = format!("RAM {:4.2}/{:4.1} GB", ram_usage_gb, ram_total_gb);
     match self.cfg.view_type {
       ViewType::Sparkline => {
-        let w = Sparkline::default()
-          .direction(RenderDirection::RightToLeft)
-          .data(&val.items)
-          .max(val.ram_total)
-          .style(self.cfg.color)
-          .bar_set(bar_set());
-
         let label_len = ram_label.len();
         let label_span = Span::styled(ram_label, Style::default().fg(self.cfg.color));
         let mut area = sections[0];
@@ -565,7 +648,24 @@ impl App {
           area.width = area.width.saturating_sub(label_len as u16 + 1);
         }
 
-        f.render_widget(w, area);
+        if self.cfg.colored_graphs {
+          let data = to_f64_vec(&val.items);
+          let w = ColorGraph::new()
+            .data(&data)
+            .max_value(val.ram_total as f64)
+            .gradient(ColorGradient::from_theme(GradientTheme::Used))
+            .symbol_set(self.cfg.graph_symbol.to_symbol_set())
+            .direction(GRAPH_DIRECTION);
+          f.render_widget(w, area);
+        } else {
+          let w = Sparkline::default()
+            .direction(RenderDirection::RightToLeft)
+            .data(&val.items)
+            .max(val.ram_total)
+            .style(self.cfg.color)
+            .bar_set(bar_set());
+          f.render_widget(w, area);
+        }
       }
       ViewType::Gauge => {
         let ratio = zero_div(ram_usage_gb, ram_total_gb);
@@ -582,13 +682,6 @@ impl App {
     let swap_label = format!("SWAP {:4.2}/{:4.1} GB", swap_usage_gb, swap_total_gb);
     match self.cfg.view_type {
       ViewType::Sparkline => {
-        let w = Sparkline::default()
-          .direction(RenderDirection::RightToLeft)
-          .data(&val.swap_items)
-          .max(val.swap_total.max(1)) // Avoid division by zero if no swap
-          .style(self.cfg.color)
-          .bar_set(bar_set());
-
         let label_len = swap_label.len();
         let label_span = Span::styled(swap_label, Style::default().fg(self.cfg.color));
         let mut area = sections[1];
@@ -600,7 +693,24 @@ impl App {
           area.width = area.width.saturating_sub(label_len as u16 + 1);
         }
 
-        f.render_widget(w, area);
+        if self.cfg.colored_graphs {
+          let data = to_f64_vec(&val.swap_items);
+          let w = ColorGraph::new()
+            .data(&data)
+            .max_value(val.swap_total.max(1) as f64) // Avoid division by zero if no swap
+            .gradient(ColorGradient::from_theme(GradientTheme::Cached))
+            .symbol_set(self.cfg.graph_symbol.to_symbol_set())
+            .direction(GRAPH_DIRECTION);
+          f.render_widget(w, area);
+        } else {
+          let w = Sparkline::default()
+            .direction(RenderDirection::RightToLeft)
+            .data(&val.swap_items)
+            .max(val.swap_total.max(1)) // Avoid division by zero if no swap
+            .style(self.cfg.color)
+            .bar_set(bar_set());
+          f.render_widget(w, area);
+        }
       }
       ViewType::Gauge => {
         let ratio = zero_div(swap_usage_gb, swap_total_gb);
@@ -688,7 +798,10 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" q quit | c color | v chart | d detail | -/+ {}ms ", self.cfg.interval);
+    let usage = format!(
+      " q quit | c color | v chart | d detail | g symbol | t tint | -/+ {}ms ",
+      self.cfg.interval
+    );
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
@@ -698,9 +811,9 @@ impl App {
       .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
       .split(iarea);
 
-    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last()), ha[0]);
-    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last()), ha[1]);
-    f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
+    self.render_power_block(f, ha[0], "CPU", &self.cpu_power, self.cpu_temp.last());
+    self.render_power_block(f, ha[1], "GPU", &self.gpu_power, self.gpu_temp.last());
+    self.render_power_block(f, ha[2], "ANE", &self.ane_power, 0.0);
   }
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
@@ -723,6 +836,8 @@ impl App {
         Event::ChangeColor => self.cfg.next_color(),
         Event::ChangeView => self.cfg.next_view_type(),
         Event::TogglePerCore => self.cfg.toggle_per_core_view(),
+        Event::ChangeGraphSymbol => self.cfg.next_graph_symbol(),
+        Event::ToggleColoredGraphs => self.cfg.toggle_colored_graphs(),
         Event::IncInterval => {
           self.cfg.inc_interval();
           *msec.write().unwrap() = self.cfg.interval;

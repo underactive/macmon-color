@@ -14,6 +14,28 @@ pub enum ViewType {
   Gauge,
 }
 
+/// Local serde-friendly mirror of `macmon_graph::SymbolSet`.
+///
+/// We keep a separate enum (rather than serializing `SymbolSet` directly) so
+/// the config format stays decoupled from the library's type — the library
+/// makes no serde guarantees, and this lets us evolve the two independently.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+pub enum GraphSymbol {
+  Braille,
+  Block,
+  TTY,
+}
+
+impl GraphSymbol {
+  pub fn to_symbol_set(self) -> macmon_graph::SymbolSet {
+    match self {
+      Self::Braille => macmon_graph::SymbolSet::Braille,
+      Self::Block => macmon_graph::SymbolSet::Block,
+      Self::TTY => macmon_graph::SymbolSet::TTY,
+    }
+  }
+}
+
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -28,6 +50,12 @@ pub struct Config {
 
   #[serde_inline_default(false)]
   pub per_core_view: bool,
+
+  #[serde_inline_default(GraphSymbol::Braille)]
+  pub graph_symbol: GraphSymbol,
+
+  #[serde_inline_default(true)]
+  pub colored_graphs: bool,
 }
 
 impl Default for Config {
@@ -111,5 +139,58 @@ impl Config {
   pub fn toggle_per_core_view(&mut self) {
     self.per_core_view = !self.per_core_view;
     self.save();
+  }
+
+  pub fn next_graph_symbol(&mut self) {
+    self.graph_symbol = match self.graph_symbol {
+      GraphSymbol::Braille => GraphSymbol::Block,
+      GraphSymbol::Block => GraphSymbol::TTY,
+      GraphSymbol::TTY => GraphSymbol::Braille,
+    };
+    self.save();
+  }
+
+  pub fn toggle_colored_graphs(&mut self) {
+    self.colored_graphs = !self.colored_graphs;
+    self.save();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use macmon_graph::SymbolSet;
+
+  // An existing macmon.json predates the new keys. serde_inline_default must
+  // fill them so older config files keep loading without error.
+  #[test]
+  fn defaults_apply_when_keys_absent() {
+    let cfg: Config = serde_json::from_str("{}").unwrap();
+    assert_eq!(cfg.graph_symbol, GraphSymbol::Braille);
+    assert!(cfg.colored_graphs);
+  }
+
+  // A config that only sets the old keys must still get the new defaults,
+  // proving forward-compatible reads of pre-Phase-3 files.
+  #[test]
+  fn partial_config_gets_graph_defaults() {
+    let cfg: Config = serde_json::from_str(r#"{"color":"Green","interval":1000}"#).unwrap();
+    assert_eq!(cfg.graph_symbol, GraphSymbol::Braille);
+    assert!(cfg.colored_graphs);
+  }
+
+  #[test]
+  fn new_keys_parse() {
+    let cfg: Config =
+      serde_json::from_str(r#"{"graph_symbol":"TTY","colored_graphs":false}"#).unwrap();
+    assert_eq!(cfg.graph_symbol, GraphSymbol::TTY);
+    assert!(!cfg.colored_graphs);
+  }
+
+  #[test]
+  fn graph_symbol_maps_to_library_symbol_set() {
+    assert_eq!(GraphSymbol::Braille.to_symbol_set(), SymbolSet::Braille);
+    assert_eq!(GraphSymbol::Block.to_symbol_set(), SymbolSet::Block);
+    assert_eq!(GraphSymbol::TTY.to_symbol_set(), SymbolSet::TTY);
   }
 }
