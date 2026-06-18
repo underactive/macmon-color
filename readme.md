@@ -6,7 +6,7 @@ A macmon fork, colorized.
 
 [<img src="https://badges.ws/github/release/vladkens/macmon" />](https://github.com/vladkens/macmon/releases)
 [<img src="https://badges.ws/github/license/vladkens/macmon" />](https://github.com/vladkens/macmon/blob/main/LICENSE)
-[<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/4caf50?icon=buymeacoffee&label=buy%20them%20a%20coffee&value=&labelColor=ffffff&iconColor=ffffff" alt="donate" />](https://buymeacoffee.com/vladkens)
+[<img src="https://badges.ws/badge//Buy%20them%20a%20coffee/4caf50?icon=buymeacoffee&labelColor=ffffff&iconColor=000000" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 </div>
 
