@@ -406,6 +406,49 @@ impl App {
     ColorGradient::from_palette(theme, self.cfg.color_palette.to_palette())
   }
 
+  /// Render a gauge as a horizontal bar using the active symbol set (braille,
+  /// block, TTY) instead of ratatui's always-solid Gauge.  Fills every row in
+  /// `r` so the gauge uses all available vertical space.  The filled portion
+  /// uses a horizontal gradient (cool on the left, hot on the right).
+  fn render_gauge_bar(&self, f: &mut Frame, r: Rect, ratio: f64, theme: GradientTheme) {
+    if r.is_empty() {
+      return;
+    }
+
+    let width = r.width as usize;
+    let height = r.height as usize;
+    let gradient = self.graph_gradient(theme);
+    let sym = self.cfg.graph_symbol.to_symbol_set();
+    let symbols = sym.table(false);
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+
+    let full = symbols[24]; // 4*5+4 = 24, the max-fill character
+
+    for col in 0..width {
+      let pct = if col < filled {
+        (col as f64 / filled.max(1) as f64 * 100.0).round() as u8
+      } else {
+        0u8
+      };
+
+      let (cr, cg, cb) = gradient.at(pct);
+      let fg_color = Color::Rgb(cr, cg, cb);
+
+      for row in 0..height {
+        let x = r.x + col as u16;
+        let y = r.y + row as u16;
+
+        if let Some(cell) = f.buffer_mut().cell_mut(Position::new(x, y)) {
+          if col < filled {
+            cell.set_char(full).set_style(Style::new().fg(fg_color));
+          } else {
+            cell.set_char(' ').set_style(Style::reset());
+          }
+        }
+      }
+    }
+  }
+
   fn render_power_block(&self, f: &mut Frame, r: Rect, label: &str, val: &PowerStore, temp: f32) {
     let label_l = format!(
       "{} {:.2}W ({:.2}, {:.2})",
@@ -478,13 +521,9 @@ impl App {
         }
       }
       ViewType::Gauge => {
-        let w = Gauge::default()
-          .block(block)
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
-          .label("")
-          .ratio(val.usage);
-        f.render_widget(w, r);
+        let inner = block.inner(r);
+        block.render(r, f.buffer_mut());
+        self.render_gauge_bar(f, inner, val.usage, theme);
       }
     }
   }
@@ -558,12 +597,19 @@ impl App {
           }
         }
         ViewType::Gauge => {
-          let w = Gauge::default()
-            .gauge_style(self.cfg.color)
-            .style(self.cfg.color)
-            .label(core_label)
-            .ratio(core.usage);
-          f.render_widget(w, core_areas[i]);
+          // Render the core label on the first few chars, then the gauge bar
+          let label_len = core_label.len();
+          let label_span = Span::styled(core_label, Style::default().fg(self.cfg.color));
+          let mut area = core_areas[i];
+
+          if area.width > label_len as u16 {
+            let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+            f.render_widget(Paragraph::new(label_span), label_area);
+            area.x += label_len as u16 + 1;
+            area.width = area.width.saturating_sub(label_len as u16 + 1);
+          }
+
+          self.render_gauge_bar(f, area, core.usage, GradientTheme::Cpu);
         }
       }
     }
@@ -605,20 +651,11 @@ impl App {
         }
       }
       ViewType::Gauge => {
-        let w = Gauge::default()
-          .block(block)
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
-          .label("")
-          .ratio(zero_div(ram_usage_gb, ram_total_gb));
-        f.render_widget(w, r);
+        let inner = block.inner(r);
+        block.render(r, f.buffer_mut());
+        self.render_gauge_bar(f, inner, zero_div(ram_usage_gb, ram_total_gb), GradientTheme::Used);
       }
     }
-  }
-
-  fn gauge_label(&self, label: String, ratio: f64) -> Span<'static> {
-    let fg = if ratio > 0.5 { Color::Black } else { self.cfg.color };
-    Span::styled(label, Style::default().fg(fg))
   }
 
   fn render_split_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
@@ -673,12 +710,18 @@ impl App {
       }
       ViewType::Gauge => {
         let ratio = zero_div(ram_usage_gb, ram_total_gb);
-        let w = Gauge::default()
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
-          .label(self.gauge_label(ram_label, ratio))
-          .ratio(ratio);
-        f.render_widget(w, sections[0]);
+        let label_len = ram_label.len();
+        let label_span = Span::styled(&ram_label, Style::default().fg(self.cfg.color));
+        let mut area = sections[0];
+
+        if area.width > label_len as u16 {
+          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+          f.render_widget(Paragraph::new(label_span), label_area);
+          area.x += label_len as u16 + 1;
+          area.width = area.width.saturating_sub(label_len as u16 + 1);
+        }
+
+        self.render_gauge_bar(f, area, ratio, GradientTheme::Used);
       }
     }
 
@@ -718,12 +761,18 @@ impl App {
       }
       ViewType::Gauge => {
         let ratio = zero_div(swap_usage_gb, swap_total_gb);
-        let w = Gauge::default()
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
-          .label(self.gauge_label(swap_label, ratio))
-          .ratio(ratio);
-        f.render_widget(w, sections[1]);
+        let label_len = swap_label.len();
+        let label_span = Span::styled(&swap_label, Style::default().fg(self.cfg.color));
+        let mut area = sections[1];
+
+        if area.width > label_len as u16 {
+          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+          f.render_widget(Paragraph::new(label_span), label_area);
+          area.x += label_len as u16 + 1;
+          area.width = area.width.saturating_sub(label_len as u16 + 1);
+        }
+
+        self.render_gauge_bar(f, area, ratio, GradientTheme::Cached);
       }
     }
   }

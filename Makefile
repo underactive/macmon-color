@@ -15,7 +15,7 @@ test:
 
 build:
 	cargo build --release
-	ls -lh target/release/$(shell basename $(CURDIR))
+	ls -lh target/release/macmon
 
 update:
 	cargo upgrade -i
