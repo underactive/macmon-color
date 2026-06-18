@@ -402,6 +402,10 @@ impl App {
     }
   }
 
+  fn graph_gradient(&self, theme: GradientTheme) -> ColorGradient {
+    ColorGradient::from_palette(theme, self.cfg.color_palette.to_palette())
+  }
+
   fn render_power_block(&self, f: &mut Frame, r: Rect, label: &str, val: &PowerStore, temp: f32) {
     let label_l = format!(
       "{} {:.2}W ({:.2}, {:.2})",
@@ -426,7 +430,7 @@ impl App {
       let w = ColorGraph::new()
         .data(&data)
         .max_value(max)
-        .gradient(ColorGradient::from_theme(self.gradient_for_power(label)))
+        .gradient(self.graph_gradient(self.gradient_for_power(label)))
         .symbol_set(self.cfg.graph_symbol.to_symbol_set())
         .direction(GRAPH_DIRECTION)
         .block(block);
@@ -457,7 +461,7 @@ impl App {
           let w = ColorGraph::new()
             .data(&data)
             .max_value(100.0)
-            .gradient(ColorGradient::from_theme(theme))
+            .gradient(self.graph_gradient(theme))
             .symbol_set(self.cfg.graph_symbol.to_symbol_set())
             .direction(GRAPH_DIRECTION)
             .block(block);
@@ -539,7 +543,7 @@ impl App {
             let w = ColorGraph::new()
               .data(&data)
               .max_value(100.0)
-              .gradient(ColorGradient::from_theme(GradientTheme::Cpu))
+              .gradient(self.graph_gradient(GradientTheme::Cpu))
               .symbol_set(self.cfg.graph_symbol.to_symbol_set())
               .direction(GRAPH_DIRECTION);
             f.render_widget(w, area);
@@ -584,7 +588,7 @@ impl App {
           let w = ColorGraph::new()
             .data(&data)
             .max_value(val.ram_total as f64)
-            .gradient(ColorGradient::from_theme(GradientTheme::Used))
+            .gradient(self.graph_gradient(GradientTheme::Used))
             .symbol_set(self.cfg.graph_symbol.to_symbol_set())
             .direction(GRAPH_DIRECTION)
             .block(block);
@@ -653,7 +657,7 @@ impl App {
           let w = ColorGraph::new()
             .data(&data)
             .max_value(val.ram_total as f64)
-            .gradient(ColorGradient::from_theme(GradientTheme::Used))
+            .gradient(self.graph_gradient(GradientTheme::Used))
             .symbol_set(self.cfg.graph_symbol.to_symbol_set())
             .direction(GRAPH_DIRECTION);
           f.render_widget(w, area);
@@ -698,7 +702,7 @@ impl App {
           let w = ColorGraph::new()
             .data(&data)
             .max_value(val.swap_total.max(1) as f64) // Avoid division by zero if no swap
-            .gradient(ColorGradient::from_theme(GradientTheme::Cached))
+            .gradient(self.graph_gradient(GradientTheme::Cached))
             .symbol_set(self.cfg.graph_symbol.to_symbol_set())
             .direction(GRAPH_DIRECTION);
           f.render_widget(w, area);
@@ -837,7 +841,7 @@ impl App {
         Event::ChangeView => self.cfg.next_view_type(),
         Event::TogglePerCore => self.cfg.toggle_per_core_view(),
         Event::ChangeGraphSymbol => self.cfg.next_graph_symbol(),
-        Event::ToggleColoredGraphs => self.cfg.toggle_colored_graphs(),
+        Event::ToggleColoredGraphs => self.cfg.next_graph_color(),
         Event::IncInterval => {
           self.cfg.inc_interval();
           *msec.write().unwrap() = self.cfg.interval;

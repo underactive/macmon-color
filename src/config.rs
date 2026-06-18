@@ -36,6 +36,27 @@ impl GraphSymbol {
   }
 }
 
+/// Local serde-friendly mirror of `macmon_graph::ColorPalette`.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy, Default)]
+pub enum GraphColorPalette {
+  #[default]
+  Btop,
+  Synthwave,
+  Hacker,
+  Aqua,
+}
+
+impl GraphColorPalette {
+  pub fn to_palette(self) -> macmon_graph::ColorPalette {
+    match self {
+      Self::Btop => macmon_graph::ColorPalette::Btop,
+      Self::Synthwave => macmon_graph::ColorPalette::Synthwave,
+      Self::Hacker => macmon_graph::ColorPalette::Hacker,
+      Self::Aqua => macmon_graph::ColorPalette::Aqua,
+    }
+  }
+}
+
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -56,6 +77,9 @@ pub struct Config {
 
   #[serde_inline_default(true)]
   pub colored_graphs: bool,
+
+  #[serde_inline_default(GraphColorPalette::Btop)]
+  pub color_palette: GraphColorPalette,
 }
 
 impl Default for Config {
@@ -150,8 +174,20 @@ impl Config {
     self.save();
   }
 
-  pub fn toggle_colored_graphs(&mut self) {
-    self.colored_graphs = !self.colored_graphs;
+  pub fn next_graph_color(&mut self) {
+    if !self.colored_graphs {
+      self.colored_graphs = true;
+      self.color_palette = GraphColorPalette::Btop;
+    } else if self.color_palette == GraphColorPalette::Btop {
+      self.color_palette = GraphColorPalette::Synthwave;
+    } else if self.color_palette == GraphColorPalette::Synthwave {
+      self.color_palette = GraphColorPalette::Hacker;
+    } else if self.color_palette == GraphColorPalette::Hacker {
+      self.color_palette = GraphColorPalette::Aqua;
+    } else {
+      self.colored_graphs = false;
+      self.color_palette = GraphColorPalette::Btop;
+    }
     self.save();
   }
 }
@@ -168,6 +204,7 @@ mod tests {
     let cfg: Config = serde_json::from_str("{}").unwrap();
     assert_eq!(cfg.graph_symbol, GraphSymbol::Braille);
     assert!(cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Btop);
   }
 
   // A config that only sets the old keys must still get the new defaults,
@@ -177,6 +214,7 @@ mod tests {
     let cfg: Config = serde_json::from_str(r#"{"color":"Green","interval":1000}"#).unwrap();
     assert_eq!(cfg.graph_symbol, GraphSymbol::Braille);
     assert!(cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Btop);
   }
 
   #[test]
@@ -185,6 +223,34 @@ mod tests {
       serde_json::from_str(r#"{"graph_symbol":"TTY","colored_graphs":false}"#).unwrap();
     assert_eq!(cfg.graph_symbol, GraphSymbol::TTY);
     assert!(!cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Btop);
+  }
+
+  #[test]
+  fn graph_color_cycles_through_modes() {
+    let mut cfg = Config::default();
+    assert!(cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Btop);
+
+    cfg.next_graph_color();
+    assert!(cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Synthwave);
+
+    cfg.next_graph_color();
+    assert!(cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Hacker);
+
+    cfg.next_graph_color();
+    assert!(cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Aqua);
+
+    cfg.next_graph_color();
+    assert!(!cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Btop);
+
+    cfg.next_graph_color();
+    assert!(cfg.colored_graphs);
+    assert_eq!(cfg.color_palette, GraphColorPalette::Btop);
   }
 
   #[test]
